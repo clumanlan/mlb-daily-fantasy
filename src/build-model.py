@@ -6,6 +6,7 @@ import numpy as np
 from statsapi import lookup_team
 import statsapi
 
+
 gamebox_summary_paths = ['s3://mlbdk-model/gamebox_summary/historical/game_boxscore_summary_info_2001_to_2012.parquet',
                          's3://mlbdk-model/gamebox_summary/historical/game_boxscore_summary_info_2013_to_2022.parquet',
                          "s3://mlbdk-model/gamebox_summary/historical/gamebox_summary_missing.parquet"]
@@ -58,7 +59,7 @@ def process_game_df(game_df):
         'away_wins', 'away_losses', 'away_ties', 'away_pct', 'away_flyOuts', 'away_groundOuts', 'away_runs', 'away_doubles', 'away_triples',
         'away_homeRuns', 'away_strikeOuts', 'away_baseOnBalls', 'away_intentionalWalks', 'away_hits',
         'away_hitByPitch', 'away_atBats', 'away_obp', 'away_caughtStealing', 'away_stolenBases','away_sacBunts',
-        'away_sacFlies', 'away_flyOuts', 'away_avg', 'away_slg', 'away_ops',
+        'away_sacFlies',  'away_avg', 'away_slg', 'away_ops',
         'away_groundIntoDoublePlay', 'away_plateAppearances', 'away_totalBases', 'away_leftOnBase', 'away_atBatsPerHomeRun']
 
     game_home_rel_cols = ['pk', 'home_id', 'home_name', 'home_leaguename', 
@@ -66,7 +67,7 @@ def process_game_df(game_df):
         'home_flyOuts', 'home_groundOuts', 'home_runs', 'home_doubles', 'home_triples',
         'home_homeRuns', 'home_strikeOuts', 'home_baseOnBalls', 'home_intentionalWalks', 'home_hits',
         'home_hitByPitch', 'home_atBats', 'home_obp', 'home_caughtStealing', 'home_stolenBases', 'home_sacBunts',
-        'home_sacFlies',  'home_flyOuts', 'home_avg', 'home_slg', 'home_ops',
+        'home_sacFlies',   'home_avg', 'home_slg', 'home_ops',
         'home_groundIntoDoublePlay', 'home_plateAppearances', 'home_totalBases', 'home_leftOnBase', 'home_atBatsPerHomeRun']
 
 
@@ -192,7 +193,7 @@ def create_batter_df(game_processed_df, batter_boxscore_processed):
 
     return batter_final_df
 
-def lag_columns(df, cols, lag):
+def lag_columns(df, group_cols, cols_to_lag, lag, drop_original_cols=True):
     """
     Create lagged versions of selected columns in a pandas DataFrame.
 
@@ -200,7 +201,9 @@ def lag_columns(df, cols, lag):
     ----------
     df : pandas.DataFrame
         Input DataFrame
-    cols : list of str
+    group_cols : list of str
+        Columns to groupby
+    cols_to_lag : list of str
         Columns to create lags for
     lag : int
         Number of lags to create
@@ -210,11 +213,13 @@ def lag_columns(df, cols, lag):
     pandas.DataFrame
         DataFrame with lagged columns added
     """
-    lagged = df.groupby(['personId', 'pitcher_name'])[cols].shift(periods=lag, fill_value=np.nan)
-    lagged.columns = [f"{col}_lag{lag}" for col in cols]
+    lagged = df.groupby(group_cols)[cols_to_lag].shift(periods=lag, fill_value=np.nan)
+    lagged.columns = [f"{col}_lag{lag}" for col in cols_to_lag]
 
     df_lagged = pd.concat([df, lagged], axis=1)
-    df_lagged = df_lagged.drop(cols, axis=1)
+
+    if drop_original_cols:
+        df_lagged = df_lagged.drop(cols_to_lag, axis=1)
     df_lagged = df_lagged.dropna()
 
     return df_lagged
@@ -222,7 +227,7 @@ def lag_columns(df, cols, lag):
 
 def rolling_summary_stats(df, group_col, time_col, window, stats={'min', 'max', 'std', 'mean', 'median', 'sum'}, window_type='observations', cols_to_exclude=None):
     """
-    Calculate rolling summary statistics over a specified window for each group in a DataFrame.
+    Calculate rolling summary statistics for columns with 'lag' over a specified window for each group in a DataFrame.
     
     Parameters
     ----------
@@ -249,8 +254,9 @@ def rolling_summary_stats(df, group_col, time_col, window, stats={'min', 'max', 
     df = df.sort_values(time_col)
     lag_cols = [col for col in df.columns if 'lag' in col]
     if cols_to_exclude != None:
-        lag_cols.remove(cols_to_exclude)
-    filtered_df = df[[group_col] + lag_cols]
+        lag_cols = [col for col in lag_cols if col not in game_cols_not_summarized]
+
+    filtered_df = df[group_col + lag_cols]
     
     if window_type == 'observations':
         # Loop through each statistic and calculate it over the rolling window for each group
@@ -264,30 +270,59 @@ def rolling_summary_stats(df, group_col, time_col, window, stats={'min', 'max', 
     
     # Reset the index and drop unnecessary columns
     summary = summary.reset_index()
-    summary = summary.rename(columns={'level_1': 'orig_index'})
+    summary = summary.rename(columns={'level_3': 'orig_index'})
 
     df = df.reset_index()
     df = df.rename(columns={'index':'orig_index'})
 
     # Merge summary statistics back into original DataFrame
-    df = df.merge(summary, on=[group_col, 'orig_index'], how='left')
+    df = df.merge(summary, on=['orig_index'] + group_col, how='left')
     df = df.drop(columns='orig_index')
     
     return df
 
 
-
-
-# pitcher -------------------------------------------
-
+# Create team level game stats ---------------------------------------
 
 team_lookup_df = team_lookup_df.rename(columns={'id':'team_id'})
 team_lookup_df = team_lookup_df[['team_id', 'teamName']]
 
 
-
 game_processed = process_game_df(season_playoff_game)
+
 game_processed = pd.merge(game_processed, team_lookup_df, on='team_id', how='left')
+game_processed['teamName'] = game_processed['teamName'].astype(str)
+game_processed = game_processed.drop(['team_name'], axis=1)
+
+game_lookup = game_processed[['gamepk', 'dateTime', 'teamName', 'season']].drop_duplicates()
+
+
+rel_num_cols_team_old = ['gamesplayed', 'wins', 'losses', 'ties', 'pct',
+       'flyOuts', 'groundOuts', 'runs', 'doubles', 'triples', 'homeRuns',
+       'strikeOuts', 'baseOnBalls', 'intentionalWalks', 'hits', 'hitByPitch',
+       'atBats', 'obp', 'caughtStealing', 'stolenBases', 'sacBunts',
+       'sacFlies', 'avg', 'slg', 'ops', 'groundIntoDoublePlay',
+       'plateAppearances', 'totalBases', 'leftOnBase', 'atBatsPerHomeRun']
+
+rel_num_cols_team_new = ['team_' + col for col in rel_num_cols_team_old]
+
+game_processed = game_processed.rename(columns=dict(zip(rel_num_cols_team_old, rel_num_cols_team_new)))
+game_processed['team_atBatsPerHomeRun'] = game_processed['team_atBatsPerHomeRun'].str.replace('-.--', '0')
+game_processed[rel_num_cols_team_new] = game_processed[rel_num_cols_team_new].astype(float)
+
+game_processed = lag_columns(game_processed, group_cols=['teamName', 'team_id', 'season'], cols_to_lag=rel_num_cols_team_new, lag=1)
+
+
+game_cols_not_summarized = ['team_gamesplayed_lag1', 'team_wins_lag1', 'team_losses_lag1', 'team_ties_lag1', 'team_pct_lag1']
+game_processed = rolling_summary_stats(game_processed, ['teamName', 'team_id', 'season'], time_col='dateTime', window=30, window_type='observations', cols_to_exclude=game_cols_not_summarized)
+
+
+
+
+
+
+# run query to make sure we have all the game_ids!!!!!!!
+# pitcher -------------------------------------------
 
 
 
@@ -295,33 +330,12 @@ game_processed = pd.merge(game_processed, team_lookup_df, on='team_id', how='lef
 # gamebox_pitcher_processed = process_pitcher_gamebox(gamebox_summary) unable to join at pitcher_name, have to get batters_faced elsewher
 pitcher_boxscore_processed = process_pitcher_boxscore(pitcher_boxscore)
 
-game_processed['teamName'] = game_processed['teamName'].astype(str)
 
-team_mapping = {'Indians': 'Guardians',
-           'Montreal Expos': 'Nationals',
-           'Expos':'Nationals',
-           'Devil Rays': 'Rays',
-           'Diamondbacks': 'D-backs'}
-
-pitcher_boxscore_processed['teamname'] = pitcher_boxscore_processed['teamname'].astype(str)
-pitcher_boxscore_processed['teamname'] = pitcher_boxscore_processed['teamname'].replace(team_mapping)
-
-pitcher_df = create_pitcher_df(game_processed, pitcher_boxscore_processed)
-
-pitcher_df['ip'] = pitcher_df['ip'].astype(float)
-pitcher_df = pitcher_df[(pitcher_df['note'] !='') & (pitcher_df['ip'] > 1)] # filter down to pitchers that have a note = starting/close
+pitcher_boxscore_processed['ip'] = pitcher_boxscore_processed['ip'].astype(float)
+pitcher_df = pitcher_boxscore_processed[(pitcher_boxscore_processed['note'] !='') & (pitcher_boxscore_processed['ip'] > 1)] # filter down to pitchers that have a note = starting/close
 
 
 rel_num_cols_player = ['ip', 'h', 'r', 'er', 'bb', 'k', 'hr', 'era', 'p', 's']
-rel_num_cols_team = ['gamesplayed', 'wins', 'losses', 'ties', 'pct',
-       'flyOuts', 'groundOuts', 'runs', 'doubles', 'triples', 'homeRuns',
-       'strikeOuts', 'baseOnBalls', 'intentionalWalks', 'hits', 'hitByPitch',
-       'atBats', 'obp', 'caughtStealing', 'stolenBases', 'sacBunts',
-       'sacFlies', 'flyOuts', 'avg', 'slg', 'ops', 'groundIntoDoublePlay',
-       'plateAppearances', 'totalBases', 'leftOnBase', 'atBatsPerHomeRun',
-       'teamName']
-
-
 pitcher_df[rel_num_cols_player] = pitcher_df[rel_num_cols_player].astype(float)
 
 def calculate_pitcher_fp(df):
@@ -334,29 +348,212 @@ def calculate_pitcher_fp(df):
     return df
 
 pitcher_df = calculate_pitcher_fp(pitcher_df)
+rel_num_cols_player.append('fp')
+
+
+pitcher_df = pd.merge(pitcher_df, game_lookup[['gamepk', 'dateTime', 'teamName', 'season']], left_on=['gamepk', 'teamname'], right_on=['gamepk','teamName'], how='left')
+
+pitcher_group_cols = ['personId', 'pitcher_name', 'season']
 
 
 # create lagged stats 
-pitcher_df_processed = lag_columns(pitcher_df, rel_num_cols_player + rel_num_cols_team, 1)
+pitcher_df = lag_columns(pitcher_df, pitcher_group_cols, rel_num_cols_player, 1, drop_original_cols=False)
 
-pitcher_df_processed = pitcher_df_processed.reset_index(drop=True)
+pitcher_df = pitcher_df.reset_index(drop=True)
 
-cols_to_exclude = ['gamesplayed_lag1']
-pitcher_df_processed = rolling_summary_stats(pitcher_df_processed, group_col='personId', time_col='dateTime', window=30, window_type='observations', cols_to_exclude=cols_to_exclude)
+cols_to_exclude = ['team_gamesplayed_lag1', 'team_wins1', 'team_losses1', 'team_ties1', 'team_pct']
+
+pitcher_df = rolling_summary_stats(pitcher_df, group_col=pitcher_group_cols, time_col='dateTime', window=30, window_type='observations', cols_to_exclude=cols_to_exclude)
 
 
 
-rays_test = game_processed[(game_processed['season']=='2016') & (game_processed['teamName']=='Rays')].sort_values('dateTime')
+# pitcher_df_processed = create_pitcher_df(game_processed, pitcher_df)
+
+pitcher_df_processed = pd.merge(pitcher_df, game_processed, on=['gamepk','dateTime', 'teamName', 'season'])
+pitcher_df_processed = pitcher_df_processed.dropna()
+
+
+
+from sklearn.compose import ColumnTransformer
+from sklearn.preprocessing import OneHotEncoder, StandardScaler
+from sklearn.linear_model import LinearRegression
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.pipeline import Pipeline
+from sklearn.base import BaseEstimator, TransformerMixin
+from sklearn.model_selection import TimeSeriesSplit, cross_val_score
+from sklearn.metrics import mean_squared_error
+from sklearn.base import BaseEstimator, TransformerMixin
+from sklearn.multioutput import MultiOutputRegressor
+from sklearn.metrics import r2_score, mean_squared_error
+import plotly.express as px
+import mlflow
+
+from category_encoders import TargetEncoder
 
 # split training and test 
 
-pitcher_train = pitcher_df_processed[pitcher_df_processed['season'].astype(int) <= 2017]
+pitcher_train = pitcher_df_processed[pitcher_df_processed['season'].astype(int) <= 2017].sort_values('dateTime')
+
+pitcher_train_subset = pitcher_train[pitcher_train['season'] != '2017']
+pitcher_train_valid = pitcher_train[pitcher_train['season'] == '2017']
+
+
 pitcher_test = pitcher_df_processed[pitcher_df_processed['season'].astype(int) > 2017]
 
-pitcher_train
+
+rel_num_cols_to_pred = ['ip', 'h', 'r', 'er', 'bb', 'k', 'hr', 'era', 'p', 's']
 
 
-pitcher_train['ip_lag1'].round()
+# base model just predicts the average ---------------------------------------------------
+
+## mlflow server --backend-store-uri sqlite:///mlflow.db --default-artifact-root mlruns/ 
+remote_server_uri = 'http://127.0.0.1:5000'
+mlflow.set_tracking_uri(remote_server_uri)
+
+
+pitcher_exp_name = 'mlb_pitcher_fantasy_regression'
+mlflow.set_experiment(pitcher_exp_name)
+
+with mlflow.start_run() as run:
+    base_model = pitcher_train_valid[['season', 'pitcher_name','personId','fp_lag1_mean_obs_30','fp']]
+    base_model['pred_residual'] = base_model['fp'] - base_model['fp_lag1_mean_obs_30']
+
+    run_name = 'base_rolling_avg'
+    base_rmse = np.sqrt(mean_squared_error(base_model['fp'], base_model['fp_lag1_mean_obs_30']))
+    base_r2 = r2_score(base_model['fp'],  base_model['fp_lag1_mean_obs_30'])
+
+    mlflow.log_metric('rmse', base_rmse)
+    mlflow.log_metric('r2', base_r2)
+
+    mlflow.set_tag('mlflow.runName', run_name) # set tag with run name so we can search for it later
+
+
+
+# residual plot is there any discernible trend?
+## it looks like there are a lot of negative residuals, meaning it predicts a high value and ends up being much lower
+px.scatter(base_model, x='fp_lag1_mean_obs_30', y='pred_residual')
+
+
+
+
+# numeric features
+rel_num_cols = [col for col in pitcher_train.columns if 'lag' in col] + ['season']
+
+# cat features 
+
+rel_cat_cols = ['personId', 'team_id']
+
+cat_pipeline_high_card = Pipeline(steps=[
+    ('encoder', TargetEncoder(smoothing=2))
+])
+
+
+
+## custom date transformer  
+date_feats = ['dayofweek', 'dayofyear',  'is_leap_year', 'quarter', 'weekofyear', 'year']
+
+class DateTransformer(BaseEstimator, TransformerMixin):
+    def fit(self, x, y=None):
+          return self
+
+    def transform(self, x):
+
+        x['dateTime'] = pd.to_datetime(x['dateTime'])
+
+        dayofweek = x.dateTime.dt.dayofweek
+        dayofyear= x.dateTime.dt.dayofyear
+        is_leap_year =  x.dateTime.dt.is_leap_year
+        quarter =  x.dateTime.dt.quarter
+        weekofyear = x.dateTime.dt.weekofyear
+        year = x.dateTime.dt.year
+
+        df_dt = pd.concat([dayofweek, dayofyear,  is_leap_year, quarter, weekofyear, year], axis=1)
+
+        return df_dt
+
+
+preprocessor = ColumnTransformer(
+    transformers=[
+        ('onehot', OneHotEncoder(handle_unknown='ignore'), rel_cat_cols),
+        ('standard_scaler', StandardScaler(), rel_num_cols),
+        ('date', DateTransformer(),  ['dateTime'])
+    ]
+)
+
+lr_pipeline = Pipeline(steps=[
+    ('preprocessor', preprocessor),
+    ('regressor', LinearRegression())
+])
+
+rf_pipeline = Pipeline(steps=[
+    ('preprocessor', preprocessor),
+    ('regressor', RandomForestRegressor(n_jobs=-1))
+])
+
+
+
+X_pitcher_train_subset = pitcher_train_subset[rel_num_cols + rel_cat_cols + ['dateTime']]
+y_pitcher_train_subset = pitcher_train_subset['fp']
+
+X_pitcher_train_valid = pitcher_train_valid[rel_num_cols + rel_cat_cols + ['dateTime']]
+y_pitcher_train_valid = pitcher_train_valid['fp']
+
+
+with mlflow.start_run() as run:
+        
+    # lr train test and predict 
+    lr_pipeline.fit(X_pitcher_train_subset, y_pitcher_train_subset)
+    y_pitcher_pred_lr = lr_pipeline.predict(X_pitcher_train_valid)
+
+    lr_r2_score = r2_score(y_pitcher_train_valid, y_pitcher_pred_lr)
+    lr_rmse = np.sqrt(mean_squared_error(y_pitcher_train_valid, y_pitcher_pred_lr))
+
+    run_name = 'lr_v0_onehot_scale_date'
+
+    mlflow.set_tag('mlflow.runName', run_name)
+    mlflow.log_metric('r2', lr_r2_score)
+    mlflow.log_metric('rmse', lr_rmse)
+
+
+lr_r2_score
+# RF PIPELINE --------------------------------------
+
+rf_pipeline.fit(X_pitcher_train, y_pitcher_train)
+y_pitcher_pred_rf = rf_pipeline.predict(X_pitcher_train)
+
+rf_r2_score = r2_score(y_pitcher_train, y_pitcher_pred_rf)
+rf_mse = mean_squared_error(y_pitcher_train, y_pitcher_pred_rf)
+
+rf_model_pred = pd.DataFrame(y_pitcher_train)
+rf_model_pred['fp_pred'] = y_pitcher_pred_rf
+rf_model_pred['residual'] = rf_model_pred['fp'] - rf_model_pred['fp_pred']
+px.scatter(rf_model_pred, x='fp_pred', y='residual')
+
+
+
+
+
+
+
+
+
+
+
+tscv = TimeSeriesSplit(n_splits=5)
+lr_cros_val_scores = cross_val_score(lr_pipeline, X_pitcher_train, y_pitcher_train, cv=tscv)
+
+
+
+
+
+
+
+
+
+
+aws_server_uri = 's3://mlbdk-model/model-artifacts/'
+mlflow.set_tracking_uri(aws_server_uri)
+
 
 
 
@@ -381,3 +578,8 @@ pitcher_df
 
 pitcher_df[pitcher_df['gamepk']==345633]
 batter_df[batter_df['gamepk']==345633]
+
+
+
+# APPENDIX ------------------------------------------------------------
+
