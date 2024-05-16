@@ -5,21 +5,28 @@ from datetime import datetime
 import numpy as np
 from statsapi import lookup_team
 import statsapi
+import re
 
+from sklearn.compose import ColumnTransformer
+from sklearn.preprocessing import OneHotEncoder, StandardScaler
+from sklearn.linear_model import LinearRegression, Ridge
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.pipeline import Pipeline
+from sklearn.base import BaseEstimator, TransformerMixin
+from sklearn.model_selection import TimeSeriesSplit, cross_val_score
+from sklearn.metrics import mean_squared_error
+from sklearn.base import BaseEstimator, TransformerMixin
+from sklearn.multioutput import MultiOutputRegressor
+from sklearn.metrics import r2_score, mean_squared_error
+import plotly.express as px
+import mlflow
+from category_encoders import TargetEncoder, CountEncoder
+from sklearn.model_selection import cross_val_score, cross_validate
 
-gamebox_summary_paths = ['s3://mlbdk-model/gamebox_summary/historical/game_boxscore_summary_info_2001_to_2012.parquet',
-                         's3://mlbdk-model/gamebox_summary/historical/game_boxscore_summary_info_2013_to_2022.parquet',
-                         "s3://mlbdk-model/gamebox_summary/historical/gamebox_summary_missing.parquet"]
-gamebox_summary =  [wr.s3.read_parquet(path) for path in gamebox_summary_paths]
-gamebox_summary = pd.concat(gamebox_summary, ignore_index=True)
+from processdataapp.module import GetData
 
-season_playoff_game_paths = ['s3://mlbdk-model/season_playoff_game_details/historical/season_n_playoff_game_data_2001_to_2012.parquet',
-                             's3://mlbdk-model/season_playoff_game_details/historical/season_n_playoff_game_data_2013_to_2022.parquet',
-                             's3://mlbdk-model/season_playoff_game_details/historical/season_n_playoff_game_data_missing.parquet']
+# READ IN DATA ------------------------------------------------------------------
 
-season_playoff_game = [wr.s3.read_parquet(path) for path in season_playoff_game_paths]
-season_playoff_game = pd.concat(season_playoff_game, ignore_index=True)
-season_playoff_game = season_playoff_game.drop_duplicates()
 
 unique_team_ids = season_playoff_game.away_id.unique()
 
@@ -30,168 +37,7 @@ for team in unique_team_ids:
 
 team_lookup_df = pd.DataFrame(team_lookup_df)
 
-batter_boxscore_paths = ['s3://mlbdk-model/batter_boxscore_stats/historical/batter_boxscore_stats_2001_to_2012.parquet',
-                         's3://mlbdk-model/batter_boxscore_stats/historical/batter_boxscore_stats_2013_to_2022.parquet',
-                         "s3://mlbdk-model/batter_boxscore_stats/historical/batter_boxscore_stats_missing.parquet"]
-batter_boxscore = [wr.s3.read_parquet(path) for path in batter_boxscore_paths]
-batter_boxscore = pd.concat(batter_boxscore, ignore_index=True)
-batter_boxscore = batter_boxscore.drop_duplicates()
 
-
-pitcher_boxscore_paths = ['s3://mlbdk-model/pitcher_boxscore_stats/historical/pitcher_boxscore_stats_2001_to_2012.parquet',
-                          's3://mlbdk-model/pitcher_boxscore_stats/historical/pitcher_boxscore_stats_2013_to_2022.parquet',
-                          "s3://mlbdk-model/pitcher_boxscore_stats/historical/pitcher_boxscore_stats_missing.parquet"]
-
-pitcher_boxscore = [wr.s3.read_parquet(path) for path in pitcher_boxscore_paths]
-pitcher_boxscore = pd.concat(pitcher_boxscore, ignore_index=True)
-pitcher_boxscore = pitcher_boxscore.drop_duplicates()
-
-
-def process_game_df(game_df):
-
-    game_rel_cols_base = ['pk', 'type', 'doubleHeader', 'gamedayType', 'gameNumber',
-        'season', 'dateTime','officialDate', 'time', 'ampm', 'dayNight', 'detailedState', 'statusCode', 
-        'attendance', 'venue_id', 'venue_name', 'venue_tz', 'capacity', 'turfType', 'roofType', 
-        'leftLine', 'leftCenter', 'center', 'rightCenter', 'rightLine', 'condition', 'temp', 'wind'
-    ]
-
-    game_away_rel_cols = ['pk', 'away_id', 'away_name', 'away_leaguename', 'away_divisionname', 'away_gamesplayed',
-        'away_wins', 'away_losses', 'away_ties', 'away_pct', 'away_flyOuts', 'away_groundOuts', 'away_runs', 'away_doubles', 'away_triples',
-        'away_homeRuns', 'away_strikeOuts', 'away_baseOnBalls', 'away_intentionalWalks', 'away_hits',
-        'away_hitByPitch', 'away_atBats', 'away_obp', 'away_caughtStealing', 'away_stolenBases','away_sacBunts',
-        'away_sacFlies',  'away_avg', 'away_slg', 'away_ops',
-        'away_groundIntoDoublePlay', 'away_plateAppearances', 'away_totalBases', 'away_leftOnBase', 'away_atBatsPerHomeRun']
-
-    game_home_rel_cols = ['pk', 'home_id', 'home_name', 'home_leaguename', 
-        'home_divisionname', 'home_gamesplayed', 'home_wins', 'home_losses', 'home_ties', 'home_pct',
-        'home_flyOuts', 'home_groundOuts', 'home_runs', 'home_doubles', 'home_triples',
-        'home_homeRuns', 'home_strikeOuts', 'home_baseOnBalls', 'home_intentionalWalks', 'home_hits',
-        'home_hitByPitch', 'home_atBats', 'home_obp', 'home_caughtStealing', 'home_stolenBases', 'home_sacBunts',
-        'home_sacFlies',   'home_avg', 'home_slg', 'home_ops',
-        'home_groundIntoDoublePlay', 'home_plateAppearances', 'home_totalBases', 'home_leftOnBase', 'home_atBatsPerHomeRun']
-
-
-    cols_missing_from_home = ['away_airOuts',  'home_airOuts', 'away_numberOfPitches','home_numberOfPitches',
-        'away_era', 'home_era',  'away_inningsPitched', 'home_inningsPitched',  'away_saveOpportunities', 'home_saveOpportunities',
-        'away_earnedRuns', 'away_whip', 'away_battersFaced', 'away_outs', 'away_completeGames', 'away_shutouts',
-        'away_pitchesThrown', 'away_balls', 'away_strikes', 'away_strikePercentage', 'away_rbi', 
-        'away_pitchesPerInning', 'away_runsScoredPer9', 'away_homeRunsPer9',
-        'home_earnedRuns', 'home_whip', 'home_battersFaced', 'home_outs', 'home_completeGames', 'home_shutouts',
-        'home_pitchesThrown', 'home_balls', 'home_strikes', 'home_strikePercentage', 'home_rbi', 
-        'home_pitchesPerInning', 'home_runsScoredPer9',   'home_homeRunsPer9', 'away_passedBall','home_passedBall']
-
-
-    game_base = game_df[game_rel_cols_base]
-    game_base_wind_values = game_base['wind'].str.split(',', expand=True)
-    game_base_wind_values.columns = ['wind_speed', 'wind_direction']
-    game_base_wind_values['wind_speed'] = game_base_wind_values['wind_speed'].str.replace(' mph', '')
-    game_base_processed = game_base.drop(['wind'], axis=1)
-    game_base_processed = game_base_processed.join(game_base_wind_values)
-
-    game_home_filtered = game_df[game_home_rel_cols]
-    game_home_filtered.columns = game_home_filtered.columns.str.replace('home_', '')
-    game_home_processed = game_base_processed.merge(game_home_filtered, on=['pk']).reset_index(drop=True)
-
-    game_away_filtered = game_df[game_away_rel_cols]
-    game_away_filtered.columns = game_away_filtered.columns.str.replace('away_', '')
-    game_away_processed = game_base_processed.merge(game_away_filtered, on=['pk']).reset_index(drop=True)
-
-    game_combined_processed = pd.concat([game_home_processed, game_away_processed], ignore_index=True)
-    game_combined_processed = game_combined_processed.rename({'pk': 'gamepk', 'type': 'game_type', 'id':'team_id', 'name': 'team_name'}, axis=1)
-
-    return game_combined_processed
-
-
-
-# PROCESS GAMEBOX DF -----------------------------------------------------------
-
-def process_pitcher_gamebox(gamebox_df):
-    """
-    Creates a pitcher table of game summary stats: batters_faced, winning_pitcher
-    """
-    gamebox_winning_pitcher = gamebox_df[gamebox_df['label'] == 'WP'].reset_index(drop=True)
-    gamebox_batters_faced = gamebox_df[gamebox_df['label'] == 'Batters faced'].reset_index(drop=True)
-
-    ### process batters faced ---------------------------
-    batters_faced_values = gamebox_batters_faced['value'].str.split(";", expand=True)
-    batters_faced_base = gamebox_batters_faced.drop(['value'], axis=1)
-    batters_faced_processed = batters_faced_base.join(batters_faced_values)
-    batters_faced_processed = batters_faced_processed.melt(id_vars=['label', 'gamepk'])
-
-    batters_faced_processed = batters_faced_processed.dropna(subset=['value']).reset_index(drop=True)
-
-    batters_faced_processed_values = batters_faced_processed['value'].str.split('(\d+)', expand=True)
-    batters_faced_processed_values.columns = ['pitcher_name', 'batters_faced', 'remove_a']
-
-    batters_faced_processed = batters_faced_processed.join(batters_faced_processed_values)
-    batters_faced_processed.drop(['variable', 'value', 'remove_a', 'label'], axis=1, inplace=True)
-    batters_faced_processed['pitcher_name'] = batters_faced_processed['pitcher_name'].str.strip()
-
-
-    ### process gamebox ------------------------------------------
-    gamebox_winning_pitcher['value'] = gamebox_winning_pitcher['value'].str.replace('.', '')
-
-    winning_pitcher_names = gamebox_winning_pitcher['value'].str.split(';', expand=True)
-    gamebox_winning_pitcher_processed = gamebox_winning_pitcher.join(winning_pitcher_names)
-    gamebox_winning_pitcher_processed.drop(['label', 'value'], axis=1, inplace=True)
-    gamebox_winning_pitcher_processed = gamebox_winning_pitcher_processed.melt(id_vars=['gamepk'], value_name='pitcher_name')
-    gamebox_winning_pitcher_processed.drop(['variable'], axis=1, inplace=True)
-    gamebox_winning_pitcher_processed.dropna(subset=['pitcher_name'], inplace=True)
-    gamebox_winning_pitcher_processed['pitcher_name'] = gamebox_winning_pitcher_processed['pitcher_name'].str.strip()
-    gamebox_winning_pitcher_processed['winning_pitcher'] = True
-
-
-    ### merge processed df into gamebox 
-    gamebox_filtered_processed = (
-        batters_faced_processed
-        .merge(gamebox_winning_pitcher_processed, on=['pitcher_name', 'gamepk'], how='left')
-    )
-
-    gamebox_filtered_processed.fillna({'winning_pitcher': False}, inplace=True)
-    gamebox_filtered_processed = gamebox_filtered_processed.drop_duplicates()
-    
-    return gamebox_filtered_processed
-
-
-def process_pitcher_boxscore(pitcher_boxscore_df): 
-
-    # PROCESS PITCHER BOXSCORE -------------------------------------------------------
-    pitcher_boxscore_processed = pitcher_boxscore_df[pitcher_boxscore_df['personId']!=0]
-    pitcher_boxscore_processed['teamname'] = pitcher_boxscore_processed['teamname'].str.replace(' Pitchers', '')
-    pitcher_boxscore_processed = pitcher_boxscore_processed.drop(['namefield'], axis=1)
-    pitcher_boxscore_processed.rename({'name':'pitcher_name'}, axis=1, inplace=True)
-
-    return pitcher_boxscore_processed
-
-
-def process_batter_boxscore(batter_boxscore_df):
-    # PROCESS BATTER BOXSCORE -------------------------------------------------
-    batter_boxscore_processed = batter_boxscore_df[~batter_boxscore_df['person_id'].isnull()]
-    batter_boxscore_processed['gamepk'] = batter_boxscore_processed['gamepk'].astype(int)
-    batter_boxscore_processed['batting_order'] =  batter_boxscore_processed['namefield'].str[0]
-    batter_boxscore_processed['teamname'] = batter_boxscore_processed['teamname'].str.replace(' Batters', '')
-
-    return batter_boxscore_processed
-
-def create_pitcher_df(game_processed_df, pitcher_boxscore_df):
-    current_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    logging.info(f'Creating Pitcher df at {current_time}')
-
-    pitcher_final_df = pd.merge(pitcher_boxscore_df, game_processed_df, left_on=['teamname', 'gamepk'], right_on=['teamName','gamepk'], how='left')
-
-    return pitcher_final_df
-
-
-def create_batter_df(game_processed_df, batter_boxscore_processed):
-
-    game_processed_filtered = game_processed_df[['gamepk','dateTime']]
-
-    batter_final_df = (
-        game_processed_filtered
-        .merge(batter_boxscore_processed, on=['gamepk'], how='left')
-    )
-
-    return batter_final_df
 
 def lag_columns(df, group_cols, cols_to_lag, lag, drop_original_cols=True):
     """
@@ -254,7 +100,7 @@ def rolling_summary_stats(df, group_col, time_col, window, stats={'min', 'max', 
     df = df.sort_values(time_col)
     lag_cols = [col for col in df.columns if 'lag' in col]
     if cols_to_exclude != None:
-        lag_cols = [col for col in lag_cols if col not in game_cols_not_summarized]
+        lag_cols = [col for col in lag_cols if col not in cols_to_exclude]
 
     filtered_df = df[group_col + lag_cols]
     
@@ -280,6 +126,8 @@ def rolling_summary_stats(df, group_col, time_col, window, stats={'min', 'max', 
     df = df.drop(columns='orig_index')
     
     return df
+
+# SO WE START HERE -------------------------------------------------
 
 
 # Create team level game stats ---------------------------------------
@@ -318,7 +166,7 @@ game_processed = rolling_summary_stats(game_processed, ['teamName', 'team_id', '
 
 
 
-
+game_processed.gamepk.value_counts(sort=True)
 
 
 # run query to make sure we have all the game_ids!!!!!!!
@@ -328,7 +176,6 @@ game_processed = rolling_summary_stats(game_processed, ['teamName', 'team_id', '
 
 
 # gamebox_pitcher_processed = process_pitcher_gamebox(gamebox_summary) unable to join at pitcher_name, have to get batters_faced elsewher
-pitcher_boxscore_processed = process_pitcher_boxscore(pitcher_boxscore)
 
 
 pitcher_boxscore_processed['ip'] = pitcher_boxscore_processed['ip'].astype(float)
@@ -348,23 +195,18 @@ def calculate_pitcher_fp(df):
     return df
 
 pitcher_df = calculate_pitcher_fp(pitcher_df)
-rel_num_cols_player.append('fp')
 
 
 pitcher_df = pd.merge(pitcher_df, game_lookup[['gamepk', 'dateTime', 'teamName', 'season']], left_on=['gamepk', 'teamname'], right_on=['gamepk','teamName'], how='left')
 
 pitcher_group_cols = ['personId', 'pitcher_name', 'season']
 
-
 # create lagged stats 
 pitcher_df = lag_columns(pitcher_df, pitcher_group_cols, rel_num_cols_player, 1, drop_original_cols=False)
 
 pitcher_df = pitcher_df.reset_index(drop=True)
 
-cols_to_exclude = ['team_gamesplayed_lag1', 'team_wins1', 'team_losses1', 'team_ties1', 'team_pct']
-
-pitcher_df = rolling_summary_stats(pitcher_df, group_col=pitcher_group_cols, time_col='dateTime', window=30, window_type='observations', cols_to_exclude=cols_to_exclude)
-
+pitcher_df = rolling_summary_stats(pitcher_df, group_col=pitcher_group_cols, time_col='dateTime', window=30, window_type='observations')
 
 
 # pitcher_df_processed = create_pitcher_df(game_processed, pitcher_df)
@@ -372,37 +214,40 @@ pitcher_df = rolling_summary_stats(pitcher_df, group_col=pitcher_group_cols, tim
 pitcher_df_processed = pd.merge(pitcher_df, game_processed, on=['gamepk','dateTime', 'teamName', 'season'])
 pitcher_df_processed = pitcher_df_processed.dropna()
 
+team_game_cols = [col for col in game_processed.columns if 'team' in col]
+game_processed_opposing = game_processed[['gamepk'] + team_game_cols]
+game_processed_opposing = game_processed_opposing.add_prefix('opposing_')
+
+pitcher_df_processed = pd.merge(pitcher_df_processed, game_processed_opposing, left_on='gamepk', right_on='opposing_gamepk', how='left')
+pitcher_df_processed = pitcher_df_processed[pitcher_df_processed['teamName'] != pitcher_df_processed['opposing_teamName']]
+pitcher_df_processed = pitcher_df_processed.dropna()
 
 
-from sklearn.compose import ColumnTransformer
-from sklearn.preprocessing import OneHotEncoder, StandardScaler
-from sklearn.linear_model import LinearRegression
-from sklearn.ensemble import RandomForestRegressor
-from sklearn.pipeline import Pipeline
-from sklearn.base import BaseEstimator, TransformerMixin
-from sklearn.model_selection import TimeSeriesSplit, cross_val_score
-from sklearn.metrics import mean_squared_error
-from sklearn.base import BaseEstimator, TransformerMixin
-from sklearn.multioutput import MultiOutputRegressor
-from sklearn.metrics import r2_score, mean_squared_error
-import plotly.express as px
-import mlflow
+# numeric features
+rel_num_cols = [col for col in pitcher_df_processed.columns if 'lag' in col] + ['season']
 
-from category_encoders import TargetEncoder
+# cat features 
+
+
+rel_cat_cols = ['personId', 'team_id']
+pitcher_df_processed['personId'] = pd.Categorical(pitcher_df_processed['personId'])
+pitcher_df_processed['team_id'] = pd.Categorical(pitcher_df_processed['team_id'])
+
 
 # split training and test 
-
 pitcher_train = pitcher_df_processed[pitcher_df_processed['season'].astype(int) <= 2017].sort_values('dateTime')
 
 pitcher_train_subset = pitcher_train[pitcher_train['season'] != '2017']
 pitcher_train_valid = pitcher_train[pitcher_train['season'] == '2017']
 
-
 pitcher_test = pitcher_df_processed[pitcher_df_processed['season'].astype(int) > 2017]
 
 
-rel_num_cols_to_pred = ['ip', 'h', 'r', 'er', 'bb', 'k', 'hr', 'era', 'p', 's']
-
+# ideas
+## choose multiple players to plot line with predictions versus actual with dots
+## exponential moving average
+## polynomial
+## library that utomatically finds time series features: tsfresh
 
 # base model just predicts the average ---------------------------------------------------
 
@@ -436,18 +281,6 @@ px.scatter(base_model, x='fp_lag1_mean_obs_30', y='pred_residual')
 
 
 
-# numeric features
-rel_num_cols = [col for col in pitcher_train.columns if 'lag' in col] + ['season']
-
-# cat features 
-
-rel_cat_cols = ['personId', 'team_id']
-
-cat_pipeline_high_card = Pipeline(steps=[
-    ('encoder', TargetEncoder(smoothing=2))
-])
-
-
 
 ## custom date transformer  
 date_feats = ['dayofweek', 'dayofyear',  'is_leap_year', 'quarter', 'weekofyear', 'year']
@@ -474,31 +307,37 @@ class DateTransformer(BaseEstimator, TransformerMixin):
 
 preprocessor = ColumnTransformer(
     transformers=[
-        ('onehot', OneHotEncoder(handle_unknown='ignore'), rel_cat_cols),
+        ('count_encode', CountEncoder(), rel_cat_cols),
+        ('target_encode', TargetEncoder(), rel_cat_cols),
         ('standard_scaler', StandardScaler(), rel_num_cols),
         ('date', DateTransformer(),  ['dateTime'])
     ]
 )
 
+
+
 lr_pipeline = Pipeline(steps=[
     ('preprocessor', preprocessor),
-    ('regressor', LinearRegression())
+    ('regressor', Ridge())
 ])
 
 rf_pipeline = Pipeline(steps=[
     ('preprocessor', preprocessor),
-    ('regressor', RandomForestRegressor(n_jobs=-1))
+    ('regressor', RandomForestRegressor(n_jobs=-1, min_samples_leaf=10))
 ])
 
-
+pitcher_train_subset = pitcher_train_subset.reset_index(drop=True)
 
 X_pitcher_train_subset = pitcher_train_subset[rel_num_cols + rel_cat_cols + ['dateTime']]
-y_pitcher_train_subset = pitcher_train_subset['fp']
+y_pitcher_train_subset = np.log(pitcher_train_subset['fp'] + 25)
 
+pitcher_train_valid = pitcher_train_valid.reset_index(drop=True)
 X_pitcher_train_valid = pitcher_train_valid[rel_num_cols + rel_cat_cols + ['dateTime']]
-y_pitcher_train_valid = pitcher_train_valid['fp']
+y_pitcher_train_valid = np.log(pitcher_train_valid['fp']+ 20)
 
 
+
+# LINEAR REGRESSION ----------------------------------------------------
 with mlflow.start_run() as run:
         
     # lr train test and predict 
@@ -508,29 +347,179 @@ with mlflow.start_run() as run:
     lr_r2_score = r2_score(y_pitcher_train_valid, y_pitcher_pred_lr)
     lr_rmse = np.sqrt(mean_squared_error(y_pitcher_train_valid, y_pitcher_pred_lr))
 
-    run_name = 'lr_v0_onehot_scale_date'
+    run_name = 'ridge_v2_log'
 
     mlflow.set_tag('mlflow.runName', run_name)
     mlflow.log_metric('r2', lr_r2_score)
     mlflow.log_metric('rmse', lr_rmse)
 
 
-lr_r2_score
-# RF PIPELINE --------------------------------------
-
-rf_pipeline.fit(X_pitcher_train, y_pitcher_train)
-y_pitcher_pred_rf = rf_pipeline.predict(X_pitcher_train)
-
-rf_r2_score = r2_score(y_pitcher_train, y_pitcher_pred_rf)
-rf_mse = mean_squared_error(y_pitcher_train, y_pitcher_pred_rf)
-
-rf_model_pred = pd.DataFrame(y_pitcher_train)
-rf_model_pred['fp_pred'] = y_pitcher_pred_rf
-rf_model_pred['residual'] = rf_model_pred['fp'] - rf_model_pred['fp_pred']
-px.scatter(rf_model_pred, x='fp_pred', y='residual')
 
 
 
+        
+    # lr train test and predict 
+lr_pipeline.fit(X_pitcher_train_subset, y_pitcher_train_subset)
+
+lr_cv_scores = cross_validate(lr_pipeline, X_pitcher_train_subset, y_pitcher_train_subset, cv=5, return_train_score=True)
+lr_cv_scores = tr
+
+
+y_pitcher_pred_lr = lr_pipeline.predict(X_pitcher_train_valid, include)
+
+cols_w_nulls = X_pitcher_train_subset.isnull().sum() > 0
+cols_w_nulls[cols_w_nulls]
+
+
+
+# RF PIPELINE SINGLE OUTCOME --------------------------------------
+
+with mlflow.start_run() as run:
+
+    rf_pipeline.fit(X_pitcher_train_subset, y_pitcher_train_subset)
+
+    y_pitcher_pred_rf_train = rf_pipeline.predict(X_pitcher_train_subset)
+    y_pitcher_pred_valid_rf = rf_pipeline.predict(X_pitcher_train_valid)
+
+    rf_r2_score_train = r2_score(y_pitcher_train_subset, y_pitcher_pred_lr_train)
+    rf_rmse_train = np.sqrt(mean_squared_error(y_pitcher_train_subset, y_pitcher_pred_lr_train))
+    
+    rf_r2_score = r2_score(y_pitcher_train_valid, y_pitcher_pred_valid_rf)
+    rf_rmse = np.sqrt(mean_squared_error(y_pitcher_train_valid, y_pitcher_pred_valid_rf))
+
+    run_name = 'rf_v3_min_sample_leafs25'
+
+    mlflow.set_tag('mlflow.runName', run_name)
+    mlflow.log_metric('r2_train', rf_r2_score_train)
+    mlflow.log_metric('rmse_train', rf_rmse_train)
+
+    mlflow.log_metric('r2', rf_r2_score)
+    mlflow.log_metric('rmse', rf_rmse)
+
+
+rf_cv_scores = cross_validate(rf_pipeline, X_pitcher_train_subset, y_pitcher_train_subset, cv=5, return_train_score=True)
+rf_cv_scores 
+
+# residual plot ---------------
+rf_pitcher_train_residual = X_pitcher_train_subset[['dateTime', 'personId']]
+rf_pitcher_train_residual['fp'] = y_pitcher_train_subset
+rf_pitcher_train_residual['fp_pred'] = y_pitcher_pred_rf_train
+rf_pitcher_train_residual['residual'] = rf_pitcher_train_residual['fp'] - rf_pitcher_train_residual['fp_pred'] 
+
+px.scatter(rf_pitcher_train_residual, x='fp_pred', y='residual')
+
+# top feature plot -------------------------------------
+date_feats = ['dayofweek', 'dayofyear',  'is_leap_year', 'quarter', 'weekofyear', 'year']
+# rf_feats = rf_pipeline['preprocessor'].named_transformers_['onehot'].get_feature_names_out().tolist() + rel_num_cols + date_feats
+
+rf_feats = ['personId_countencode' + 'team_id_countencode'] + ['personId_target' + 'team_id_target'] + rel_num_cols + date_feats
+
+rf_feat_importances = rf_pipeline['regressor'].feature_importances_
+len(rf_feats)
+len(rf_feat_importances)
+rf_feats_df = pd.DataFrame({'feature': rf_feats, 'rf_feat_importances': rf_feat_importances})
+
+top_10_feats_pos = rf_feats_df.sort_values('rf_feat_importances', ascending=False).head(10)
+top_10_feats_pos.plot(kind='barh', x='feature', y='rf_feat_importances')
+
+top_10_feats_neg = rf_feats_df.sort_values('rf_feat_importances').head(10)
+top_10_feats_neg.plot(kind='barh', x='feature', y='rf_feat_importances')
+
+
+
+
+
+
+
+# h20 random forest -----------------------------------------
+
+
+import h2o
+from h2o.estimators import H2ORandomForestEstimator
+from h2o.transforms.preprocessing import H2OColumnTransformer
+
+h2o.init()
+
+# Convert the pandas DataFrames to H2OFrame
+h2o_train = h2o.H2OFrame(pd.concat([X_pitcher_train_subset, y_pitcher_train_subset], axis=1))
+
+
+h2o_valid = h2o.H2OFrame(pd.concat([X_pitcher_train_valid, y_pitcher_train_valid]), axis=1)
+
+# Specify the column names for input features and target variables
+feature_cols = X_pitcher_train_subset.columns.tolist()
+target_col = ['fp']
+
+# Train the DRF model
+pitcher_rf = h2o.randomForest(x = feature_cols, y = target_col,
+                            training_frame = h2o_train, nfolds = 5,
+                            seed = 1234)
+
+# Define the H2O Random Forest model
+rf_model = H2ORandomForestEstimator(seed=42)
+
+# Shut down the H2O cluster
+h2o.shutdown(prompt=False)
+
+
+
+
+from merf import MERF
+merf = MERF()
+
+X_pitcher_train_clusters = X_pitcher_train_subset['personId'].astype(str)
+X_pitcher_train_subset_merf = X_pitcher_train_subset.drop(['personId'], axis=1)
+Z_train = np.ones(shape=(X_pitcher_train_subset_merf.shape[0],1))
+
+X_pitcher_train_valid_clusters = X_pitcher_train_valid['personId'].astype(str)
+X_pitcher_train_valid_merf = X_pitcher_train_valid.drop(['personId'], axis=1)
+Z_train_valid = np.ones(shape=(X_pitcher_train_valid.shape[0],1))
+
+
+def add_datepart(df, fldname, drop=True, time=False):
+    fld = df[fldname]
+    fld_dtype = fld.dtype
+    if isinstance(fld_dtype, pd.core.dtypes.dtypes.DatetimeTZDtype):
+        fld_dtype = np.datetime64
+
+    if not np.issubdtype(fld_dtype, np.datetime64):
+        df[fldname] = fld = pd.to_datetime(fld, infer_datetime_format=True)
+    targ_pre = re.sub('[Dd]ate$', '', fldname)
+    attr = ['Year', 'Month', 'Week', 'Day', 'Dayofweek', 'Dayofyear',
+            'Is_month_end', 'Is_month_start', 'Is_quarter_end', 'Is_quarter_start', 'Is_year_end', 'Is_year_start']
+    if time: attr = attr + ['Hour', 'Minute', 'Second']
+    for n in attr: df[targ_pre + n] = getattr(fld.dt, n.lower())
+    df[targ_pre + 'Elapsed'] = fld.astype(np.int64) // 10 ** 9
+    if drop: df.drop(fldname, axis=1, inplace=True)
+
+X_pitcher_train_subset_merf['dateTime'] = pd.to_datetime(X_pitcher_train_subset_merf['dateTime'])
+X_pitcher_train_valid_merf['dateTime'] = pd.to_datetime(X_pitcher_train_valid_merf['dateTime'])
+
+add_datepart(X_pitcher_train_subset_merf, 'dateTime')
+add_datepart(X_pitcher_train_valid_merf, 'dateTime')
+
+
+merf.fit(X_pitcher_train_subset_merf, Z_train, X_pitcher_train_clusters,  y_pitcher_train_subset)
+
+merf_valid_pred = merf.predict(X_pitcher_train_valid_merf, Z_train_valid, X_pitcher_train_valid_clusters)
+
+merf_r2_score = r2_score(y_pitcher_train_valid, merf_valid_pred)
+merf_rmse = np.sqrt(mean_squared_error(y_pitcher_train_valid, merf_valid_pred))
+
+merf_r2_score
+merf_rmse
+
+
+
+# each pitcher has different consistencies, so you just want to program those consistencies into it
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ Initialization ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+clusters = X_pitcher_train_subset['personId']
+n_clusters = clusters.nunique()
+n_obs = len(y_pitcher_train_subset)
+q = Z_train.shape[1]  # random effects dimension
+Z = np.array(Z_train)  # cast Z to numpy array (required if it's a dataframe, otw, the matrix mults later fail)
+
+cluster_counts = clusters.value_counts()
 
 
 
@@ -539,9 +528,42 @@ px.scatter(rf_model_pred, x='fp_pred', y='residual')
 
 
 
-tscv = TimeSeriesSplit(n_splits=5)
-lr_cros_val_scores = cross_val_score(lr_pipeline, X_pitcher_train, y_pitcher_train, cv=tscv)
 
+        # Do expensive slicing operations only once
+Z_by_cluster = {}
+y_by_cluster = {}
+n_by_cluster = {}
+I_by_cluster = {}
+indices_by_cluster = {}
+
+279824
+indices_i
+cluster_id = 279824
+indices_i = clusters == cluster_id
+indices_by_cluster[cluster_id] = indices_i
+
+Z_by_cluster['cluster_id'] = Z[indices_i]
+
+Z_by_cluster[cluster_id] = Z[indices_i]
+y_by_cluster[cluster_id] = y[indices_i]
+
+            # Get the counts for each cluster and create the appropriately sized identity matrix for later computations
+n_by_cluster[cluster_id] = cluster_counts[cluster_id]
+I_by_cluster[cluster_id] = np.eye(cluster_counts[cluster_id])
+
+
+for cluster_id in cluster_counts.index:
+            # Find the index for all the samples from this cluster in the large vector
+    indices_i = clusters == cluster_id
+    indices_by_cluster[cluster_id] = indices_i
+
+            # Slice those samples from Z and y
+    Z_by_cluster[cluster_id] = Z[indices_i]
+    y_by_cluster[cluster_id] = y[indices_i]
+
+            # Get the counts for each cluster and create the appropriately sized identity matrix for later computations
+    n_by_cluster[cluster_id] = cluster_counts[cluster_id]
+    I_by_cluster[cluster_id] = np.eye(cluster_counts[cluster_id])
 
 
 
@@ -583,3 +605,33 @@ batter_df[batter_df['gamepk']==345633]
 
 # APPENDIX ------------------------------------------------------------
 
+
+rel_num_cols_to_pred = ['ip', 'h', 'r', 'er', 'bb', 'k', 'hr', 'era', 'p', 's']
+from sklearn.multioutput import MultiOutputRegressor
+
+y_pitcher_train_subset_multioutput = pitcher_train_subset[rel_num_cols_to_pred]
+y_pitcher_train_valid_multioutput = pitcher_train_valid[rel_num_cols_to_pred]
+
+
+rf_multioutput_pipeline = Pipeline(steps=[
+    ('preprocessor', preprocessor),
+    ('regressor', MultiOutputRegressor(RandomForestRegressor(n_jobs=-1)))
+])
+
+
+rf_multioutput_pipeline.fit(X_pitcher_train_subset, y_pitcher_train_subset_multioutput)
+
+
+with mlflow.start_run() as run:
+
+    rf_pipeline.fit(X_pitcher_train_subset, y_pitcher_train_subset)
+    y_pitcher_pred_valid_rf = rf_pipeline.predict(X_pitcher_train_valid)
+
+    rf_r2_score = r2_score(y_pitcher_train_valid, y_pitcher_pred_valid_rf)
+    rf_rmse = np.sqrt(mean_squared_error(y_pitcher_train_valid, y_pitcher_pred_valid_rf))
+
+    run_name = 'rf_multioutcome_v1_opposing_team_stats'
+
+    mlflow.set_tag('mlflow.runName', run_name)
+    mlflow.log_metric('r2', rf_r2_score)
+    mlflow.log_metric('rmse', rf_rmse)
