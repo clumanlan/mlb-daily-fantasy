@@ -1,5 +1,5 @@
 
 .mlb-daily_venv
-.data/
-.process-data-app/src/
+data/
+process-data-app/src/
 .mlflow.db
